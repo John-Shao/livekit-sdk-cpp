@@ -196,11 +196,11 @@ echo "==============="
 
 if [ "$BG" = "1" ]; then
   rm -f "$LOG"
-  nohup stdbuf -o0 -e0 ./BoardLoopback > "$LOG" 2>&1 &
+  nohup ./BoardLoopback > "$LOG" 2>&1 &
   PID=$!
   echo "started pid=$PID"
   echo "tail with: $0 --tail"
   echo "stop with: kill $PID"
 else
-  exec stdbuf -o0 -e0 ./BoardLoopback
+  exec ./BoardLoopback
 fi

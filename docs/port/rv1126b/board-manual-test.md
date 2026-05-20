@@ -3,7 +3,9 @@
 > 适用版本：`port/rv1126b-on-upstream-v0.3.3`（tag `v0.3.3-rv1126b-phase8`）
 > 最后更新：2026-05-20
 
-板子 WiFi 不稳定时，推荐通过**串口控制台**直接操作。本文档覆盖：部署、启动、HTTP API 验证、常见问题。
+板子 WiFi 不稳定时，推荐通过**串口控制台**直接操作。本文档覆盖：WSL SSH 环境配置、部署、启动、HTTP API 验证、常见问题。
+
+> **所有宿主机命令均在 WSL 中执行**（`root@DESKTOP-72PRKBU`），除非特别说明。
 
 ---
 
@@ -15,32 +17,95 @@
 | 屏幕 | 720×1280 竖屏 MIPI DSI |
 | 摄像头 | `/dev/video-camera0`（1280×720 横向输出，物理竖装）|
 | 音频 | ES8389 codec，ALSA card 0 |
-| SSH 别名 | `rv1126b-board`（`~/.ssh/config`，IP 靠 DHCP 可变）|
+| 板子 IP | `192.168.10.235`（固定，已配 SSH 别名 `rv1126b-board`）|
+| 构建 VM IP | `192.168.126.129`（固定，SSH 别名 `rv1126b-vm`）|
 | 串口 | USB-TTL 115200 8N1，板子端 `/dev/ttyS2` 或 `/dev/ttyFIQ0` |
-
-> **WiFi IP 经常变**（DHCP）。如果 `ssh rv1126b-board` 超时，先从串口或路由器查新 IP，更新 `~/.ssh/config` 里的 `HostName`，然后重新安装公钥（见第 2 节）。
 
 ---
 
-## 2. 部署文件到板子
+## 2. WSL SSH 环境配置（首次 / 新 WSL 实例）
 
-每次板子重启后 `/root/.ssh/authorized_keys` 会清空（overlay 文件系统）。部署前先装公钥：
+Windows 的 SSH key 在 `C:\Users\19146\.ssh\`，WSL 的 SSH 客户端使用自己的
+`~/.ssh/`。需要将 key 注入 WSL（复制一份，不能用 symlink——`/mnt/c/` 挂载不支持 chmod 600）。
 
 ```bash
-# 在 Windows 终端里运行，密码是 rockchip
-ssh root@<board-ip> 'mkdir -p /root/.ssh && \
-  echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINHoUYAf/Ws8wWErE03TX+4Ab1KYvQS0BfNKPqyek1IA claude-code@rv1126b-board 20260424" \
-  >> /root/.ssh/authorized_keys && \
-  chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys && echo done'
+# 在 WSL 中执行
+mkdir -p ~/.ssh
+
+# 复制 SSH keys（Windows 路径 → WSL）
+cp /mnt/c/Users/19146/.ssh/id_rv1126b_board ~/.ssh/id_rv1126b_board
+cp /mnt/c/Users/19146/.ssh/id_rv1126b_vm    ~/.ssh/id_rv1126b_vm
+
+# SSH 要求私钥权限必须是 600，否则拒绝使用
+chmod 700 ~/.ssh
+chmod 600 ~/.ssh/id_rv1126b_board ~/.ssh/id_rv1126b_vm
+
+# 写 WSL 的 SSH config（如果还没有）
+cat > ~/.ssh/config << 'EOF'
+Host rv1126b-vm
+    HostName 192.168.126.129
+    User alientek
+    IdentityFile ~/.ssh/id_rv1126b_vm
+    IdentitiesOnly yes
+    StrictHostKeyChecking accept-new
+
+Host rv1126b-board
+    HostName 192.168.10.235
+    User root
+    IdentityFile ~/.ssh/id_rv1126b_board
+    IdentitiesOnly yes
+    StrictHostKeyChecking accept-new
+EOF
+chmod 600 ~/.ssh/config
 ```
 
-公钥装好后，更新 `~/.ssh/config` 里的 HostName 为新 IP，然后部署应用文件：
+验证：
 
 ```bash
-# 创建目录
+ssh rv1126b-vm   'echo vm ok'
+ssh rv1126b-board 'echo board ok'
+```
+
+> **每次 WSL 重建**（`wsl --shutdown` 后首次开新 distro）都需重复本节。
+> WSL 实例数据持久化，通常只需配置一次。
+
+---
+
+## 3. 重装公钥（板子每次重启后）
+
+板子 rootfs 是 overlay，`/root/.ssh/` 在重启后回到出厂状态，需重装公钥。
+板子 root 密码：`rockchip`。
+
+```bash
+# 在 WSL 中执行，出现密码提示时输入 rockchip
+ssh-copy-id -i ~/.ssh/id_rv1126b_board.pub root@192.168.10.235
+
+# 或手动方式（ssh-copy-id 不可用时）
+ssh root@192.168.10.235 \
+  'mkdir -p /root/.ssh && \
+   echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINHoUYAf/Ws8wWErE03TX+4Ab1KYvQS0BfNKPqyek1IA claude-code@rv1126b-board 20260424" \
+   >> /root/.ssh/authorized_keys && \
+   chmod 700 /root/.ssh && chmod 600 /root/.ssh/authorized_keys && echo done'
+```
+
+装完后测试无密码登录：
+
+```bash
+ssh rv1126b-board 'uname -a'
+```
+
+---
+
+## 4. 部署文件到板子
+
+```bash
+# 在 WSL 中执行（项目根目录）
+cd /mnt/d/workspace/Meeting/livekit-sdk-cpp-0.3.3
+
+# 创建目标目录
 ssh rv1126b-board 'mkdir -p /opt/livekit'
 
-# 从构建 VM 拷贝二进制和库
+# 从构建 VM 拷贝二进制和共享库
 scp rv1126b-vm:~/livekit/livekit-sdk-cpp-0.3.3/build-rv1126b/bin/BoardLoopback \
     rv1126b-board:/opt/livekit/
 
@@ -62,31 +127,27 @@ ssh rv1126b-board 'ls -la /opt/livekit/'
 
 ---
 
-## 3. 生成 LiveKit Token
+## 5. LiveKit Token
 
-在开发机上生成入会 token（需安装 `lk` CLI）：
+测试房间使用固定 JWT：`f1d641ae-e19d-4461-8a8b-2582d4036798`
 
-```bash
-lk token create \
-  --room <房间名> \
-  --identity board-001 \
-  --join \
-  --valid-for 240h
-```
-
-或通过后端接口获取 JWT，写到板子：
+写到板子（只需写一次，重启后不会丢失——`/opt/livekit/` 在持久层）：
 
 ```bash
-echo '<JWT>' | ssh rv1126b-board 'cat > /opt/livekit/.token && chmod 600 /opt/livekit/.token'
+# 在 WSL 中执行
+echo 'f1d641ae-e19d-4461-8a8b-2582d4036798' | \
+  ssh rv1126b-board 'cat > /opt/livekit/.token && chmod 600 /opt/livekit/.token'
 ```
+
+smoke.sh 会自动读取 `/opt/livekit/.token`，无需每次传 `--token` 参数。
 
 ---
 
-## 4. 启动 BoardLoopback
+## 6. 启动 BoardLoopback
 
-### 4.1 串口控制台启动（推荐，WiFi 不稳时）
+### 6.1 串口控制台启动（推荐，WiFi 不稳时）
 
-连上串口后直接在板子 shell 里操作：
+连上串口（115200 8N1）后在板子 shell 里操作：
 
 ```sh
 cd /opt/livekit
@@ -107,71 +168,70 @@ tail -f /tmp/smoke.log
 [daemon] waiting for HTTP /v1/meeting/join ...
 ```
 
-### 4.2 SSH 启动（WiFi 稳定时）
+### 6.2 SSH 启动（WiFi 稳定时，在 WSL 中执行）
 
 ```bash
 ssh rv1126b-board 'cd /opt/livekit && BOARD_API_TOKEN=test123 ./smoke.sh --bg'
 ssh rv1126b-board 'tail -f /tmp/smoke.log'
 ```
 
-### 4.3 停止进程
+### 6.3 停止进程
 
 ```sh
 # 板子上（BusyBox 没有 pkill，用 kill + PID）
 kill $(ps | grep BoardLoopback | grep -v grep | awk '{print $1}')
-# 或直接用 smoke.sh 的 leave API（见第 5 节）
 ```
 
 ---
 
-## 5. HTTP API 验证
+## 7. HTTP API 验证
 
-BoardLoopback 运行后在 `0.0.0.0:8080` 提供三个端点。从**同局域网的开发机**调用。
+BoardLoopback 运行后在 `0.0.0.0:8080` 提供三个端点。以下命令在 **WSL** 中执行。
 
-### 5.1 查询状态（无需认证）
+### 7.1 查询状态（无需认证）
 
 ```bash
-curl http://<board-ip>:8080/v1/meeting/status
+curl http://192.168.10.235:8080/v1/meeting/status
 # 正常返回：{"state":"idle","participant_count":0,"active_speaker":"","room_name":""}
 ```
 
-### 5.2 入会
+### 7.2 入会
 
 ```bash
-curl -X POST http://<board-ip>:8080/v1/meeting/join \
+curl -X POST http://192.168.10.235:8080/v1/meeting/join \
   -H "Authorization: Bearer test123" \
   -H "Content-Type: application/json" \
-  -d '{"url":"wss://live.jusiai.com","token":"<JWT>"}'
+  -d '{"url":"wss://live.jusiai.com","token":"f1d641ae-e19d-4461-8a8b-2582d4036798"}'
 # 返回 202 Accepted
 ```
 
 入会后查状态：
 
 ```bash
-curl http://<board-ip>:8080/v1/meeting/status
+curl http://192.168.10.235:8080/v1/meeting/status
 # {"state":"in_meeting","room_name":"<ROOM>","participant_count":1,"active_speaker":""}
 ```
 
-### 5.3 退会
+### 7.3 退会
 
 ```bash
-curl -X POST http://<board-ip>:8080/v1/meeting/leave \
+curl -X POST http://192.168.10.235:8080/v1/meeting/leave \
   -H "Authorization: Bearer test123"
 # 返回 200
 ```
 
-### 5.4 认证失败验证
+### 7.4 认证失败验证
 
 ```bash
-curl -X POST http://<board-ip>:8080/v1/meeting/join \
+curl -X POST http://192.168.10.235:8080/v1/meeting/join \
   -H "Content-Type: application/json" \
-  -d '{"url":"wss://...","token":"..."}'
-# 应返回 401 Unauthorized
+  -d '{"url":"wss://live.jusiai.com","token":"f1d641ae-e19d-4461-8a8b-2582d4036798"}'
+# 应返回 401 Unauthorized（无 Bearer 头）
 ```
 
 ---
 
-## 6. 显示验证场景
+## 8. 显示验证场景
 
 | 场景 | 操作 | 预期结果 |
 |---|---|---|
@@ -183,10 +243,10 @@ curl -X POST http://<board-ip>:8080/v1/meeting/join \
 
 ---
 
-## 7. 音频验证
+## 9. 音频验证
 
 ```bash
-# 检查 ALSA 增益设置
+# 在 WSL 中检查 ALSA 增益
 ssh rv1126b-board 'amixer -c 0 cget numid=39 && amixer -c 0 cget numid=48'
 # numid=39 (ADCL PGA) 应为 9 (+27 dB)
 # numid=48 (DACL) 应为 155 (-18 dB, AEC sweet spot)
@@ -195,14 +255,11 @@ ssh rv1126b-board 'amixer -c 0 cget numid=39 && amixer -c 0 cget numid=48'
 ssh rv1126b-board 'cd /opt/livekit && ./board-audio-setup.sh'
 ```
 
-AEC 验证：
-
-- 对端说话时，板子本地扬声器播放远端语音，不应产生回声循环
-- ERLE（回声抑制量）与 Phase 8.1 标定结果（`DAC=155, delay=300`）一致
+AEC 验证：对端说话时板子扬声器播放，不应产生回声循环。标定参数：`DAC=155, AEC_DELAY=300ms`。
 
 ---
 
-## 8. 常见问题
+## 10. 常见问题
 
 ### 端口 8080 被占用
 
@@ -211,7 +268,7 @@ AEC 验证：
 ```
 
 ```sh
-# 找到占用进程并杀掉
+# 板子上
 ps | grep Board
 kill -9 <PID>
 ```
@@ -222,50 +279,49 @@ kill -9 <PID>
 [loopback] v4l2 S_FMT failed: Device or resource busy
 ```
 
-同上，有残留 BoardLoopback 进程在跑，kill 后重启。
+同上，有残留 BoardLoopback 进程，kill 后重启。
 
 ### 公钥每次重启后失效
 
-板子 rootfs 是 overlay，`/root/.ssh/` 在重启后回到出厂状态。每次重启后需要重新安装公钥（见第 2 节）。如需持久化，把公钥写入 overlay 的持久层（视板子 Buildroot 配置决定是否支持）。
+overlay rootfs 设计如此。每次重启执行第 3 节命令重装。如需持久化，把公钥写入板子 overlay 持久层（需 Buildroot 支持）。
 
-### stdbuf 命令不存在
-
-smoke.sh 里已去掉 `stdbuf`，BusyBox 环境下可直接运行。如果看到旧版报错，重新 scp smoke.sh 到板子。
-
-### SSH 超时 / IP 变了
+### SSH 超时
 
 ```bash
-# 1. 从路由器 DHCP 表或串口 ip addr 查新 IP
-# 2. 更新 ~/.ssh/config 里的 HostName
-# 3. 重装公钥（见第 2 节）
+# 在 WSL 中检查连通性
+ping 192.168.10.235
+# 如果超时，IP 可能变了，从路由器 DHCP 表或串口 `ip addr` 查新 IP
+# 然后更新 WSL 的 ~/.ssh/config 里的 HostName
 ```
 
 ---
 
-## 9. 完整部署一键脚本（网络稳定时）
+## 11. 一键部署脚本（WSL，网络稳定时）
 
 ```bash
 #!/bin/bash
-# 从开发机一键部署到板子
+# 在 WSL 中执行，从项目根目录运行
 set -e
+cd /mnt/d/workspace/Meeting/livekit-sdk-cpp-0.3.3
+
 BOARD=rv1126b-board
 VM=rv1126b-vm
-LIVEKIT_BUILD=$HOME/livekit/livekit-sdk-cpp-0.3.3/build-rv1126b
+VM_BUILD=~/livekit/livekit-sdk-cpp-0.3.3/build-rv1126b
 
 ssh $BOARD 'mkdir -p /opt/livekit'
-scp ${VM}:${LIVEKIT_BUILD}/bin/BoardLoopback $BOARD:/opt/livekit/
-scp ${VM}:${LIVEKIT_BUILD}/lib/liblivekit.so \
-    ${VM}:${LIVEKIT_BUILD}/lib/liblivekit_ffi.so $BOARD:/opt/livekit/
+scp ${VM}:${VM_BUILD}/bin/BoardLoopback $BOARD:/opt/livekit/
+scp ${VM}:${VM_BUILD}/lib/liblivekit.so \
+    ${VM}:${VM_BUILD}/lib/liblivekit_ffi.so $BOARD:/opt/livekit/
 scp scripts/smoke.sh scripts/board-audio-setup.sh $BOARD:/opt/livekit/
 ssh $BOARD 'chmod +x /opt/livekit/smoke.sh /opt/livekit/board-audio-setup.sh'
-echo "deploy ok"
+echo "deploy ok — $(ssh $BOARD 'ls -sh /opt/livekit/BoardLoopback')"
 ```
 
 ---
 
-## 10. 测试矩阵（完整验收）
+## 12. 测试矩阵（完整验收）
 
-以下矩阵对应 Phase 8.4.6 验收标准：
+以下矩阵对应 Phase 8.4.6 验收标准（HTTP API 命令在 WSL 中执行）：
 
 | # | 场景 | 操作 | 通过标准 |
 |---|---|---|---|

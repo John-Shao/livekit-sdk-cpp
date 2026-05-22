@@ -135,8 +135,10 @@ endif()
 # Make abseil available first so protobuf can find absl:: targets.
 FetchContent_MakeAvailable(livekit_abseil)
 
-# Workaround for some abseil flags on Apple Silicon.
-if(APPLE AND (CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64"))
+# Workaround for some abseil flags on aarch64 (originally Apple Silicon only,
+# but the same x86-only flags appear when cross-compiling abseil for any aarch64
+# target — e.g. Linux aarch64 via Buildroot). Filter unconditionally on aarch64.
+if(CMAKE_SYSTEM_PROCESSOR MATCHES "arm64|aarch64")
   foreach(t
     absl_random_internal_randen_hwaes_impl
     absl_random_internal_randen_hwaes
@@ -163,7 +165,16 @@ endif()
 FetchContent_MakeAvailable(livekit_protobuf)
 
 # Protobuf targets: modern protobuf exports protobuf::protoc etc.
-if(TARGET protobuf::protoc)
+# 交叉编译时 vendored protoc 是 target 架构的二进制，在 host 跑不起来 ——
+# 优先使用调用方 -DProtobuf_PROTOC_EXECUTABLE=<host-path> 指定的 host protoc；
+# 若未指定则 fallback 到 PATH 中的 protoc。Native 编译继续用 vendored。
+if(CMAKE_CROSSCOMPILING)
+  if(NOT Protobuf_PROTOC_EXECUTABLE OR Protobuf_PROTOC_EXECUTABLE MATCHES "TARGET_FILE")
+    find_program(_host_protoc NAMES protoc REQUIRED)
+    set(Protobuf_PROTOC_EXECUTABLE "${_host_protoc}" CACHE STRING "protoc (host for cross)" FORCE)
+  endif()
+  message(STATUS "Cross-compile: using host protoc = ${Protobuf_PROTOC_EXECUTABLE}")
+elseif(TARGET protobuf::protoc)
   set(Protobuf_PROTOC_EXECUTABLE "$<TARGET_FILE:protobuf::protoc>" CACHE STRING "protoc (vendored)" FORCE)
 elseif(TARGET protoc)
   set(Protobuf_PROTOC_EXECUTABLE "$<TARGET_FILE:protoc>" CACHE STRING "protoc (vendored)" FORCE)

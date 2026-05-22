@@ -55,6 +55,21 @@ function(livekit_configure_cpp_example_collection)
     )
   endif()
 
+  # RV1126B port: the example collection is configured as a *separate* CMake
+  # project, so it does not inherit the parent's cross-compilation toolchain.
+  # Without this it would silently build for the host. Propagate the toolchain
+  # file (resolved to an absolute path) so board_loopback and the other
+  # examples come out as aarch64 ELF matching the cross-built SDK. The sysroot
+  # / compiler env vars (ATK_TOOLCHAIN_ROOT, ATK_SYSROOT) are inherited by the
+  # child process from scripts/env-rv1126b.sh.
+  if(CMAKE_CROSSCOMPILING AND CMAKE_TOOLCHAIN_FILE)
+    get_filename_component(_lk_examples_toolchain "${CMAKE_TOOLCHAIN_FILE}"
+      ABSOLUTE BASE_DIR "${CMAKE_SOURCE_DIR}")
+    list(APPEND _lk_examples_configure_args
+      "-DCMAKE_TOOLCHAIN_FILE=${_lk_examples_toolchain}"
+    )
+  endif()
+
   add_custom_target(cpp_example_collection ALL
     COMMAND ${CMAKE_COMMAND} -S "${LIVEKIT_CPP_EXAMPLES_SOURCE_DIR}"
             -B "${LIVEKIT_CPP_EXAMPLES_BINARY_DIR}"

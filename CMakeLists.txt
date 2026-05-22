@@ -88,7 +88,15 @@ include(protobuf)
 # spdlog logging library (PRIVATE dependency).
 include(spdlog)
 # Ensure protoc executable is found.
-if(TARGET protobuf::protoc)
+# 交叉编译时 vendored protoc 是 target 架构的，host 跑不起来 —— 优先保留
+# protobuf.cmake 里已经填好的 host protoc（来自 -DProtobuf_PROTOC_EXECUTABLE
+# 或 find_program）。Native 优先用 vendored target，因为它和 vendored 运行时
+# 同源一致。
+if(CMAKE_CROSSCOMPILING)
+  if(NOT Protobuf_PROTOC_EXECUTABLE OR Protobuf_PROTOC_EXECUTABLE MATCHES "TARGET_FILE")
+    find_program(Protobuf_PROTOC_EXECUTABLE NAMES protoc REQUIRED)
+  endif()
+elseif(TARGET protobuf::protoc)
   set(Protobuf_PROTOC_EXECUTABLE "$<TARGET_FILE:protobuf::protoc>")
 elseif(NOT Protobuf_PROTOC_EXECUTABLE)
   find_program(Protobuf_PROTOC_EXECUTABLE NAMES protoc REQUIRED)
@@ -163,13 +171,19 @@ find_program(CARGO_EXECUTABLE NAMES cargo REQUIRED)
 
 set(RUST_ROOT ${LIVEKIT_ROOT_DIR}/client-sdk-rust)
 
-# Determine Rust target triple for cross-compilation on macOS
+# Determine Rust target triple for cross-compilation
 set(RUST_TARGET_TRIPLE "")
 if(APPLE AND CMAKE_OSX_ARCHITECTURES)
   if(CMAKE_OSX_ARCHITECTURES STREQUAL "x86_64")
     set(RUST_TARGET_TRIPLE "x86_64-apple-darwin")
   elseif(CMAKE_OSX_ARCHITECTURES STREQUAL "arm64")
     set(RUST_TARGET_TRIPLE "aarch64-apple-darwin")
+  endif()
+elseif(CMAKE_CROSSCOMPILING AND CMAKE_SYSTEM_NAME STREQUAL "Linux")
+  if(CMAKE_SYSTEM_PROCESSOR MATCHES "^(aarch64|arm64)$")
+    set(RUST_TARGET_TRIPLE "aarch64-unknown-linux-gnu")
+  elseif(CMAKE_SYSTEM_PROCESSOR MATCHES "^arm")
+    set(RUST_TARGET_TRIPLE "armv7-unknown-linux-gnueabihf")
   endif()
 endif()
 
@@ -184,12 +198,27 @@ endif()
 # system libstdc++ lacks symbols like __cxa_call_terminate.
 set(GCC_LIB_DIR "")
 if(NOT WIN32)
-  get_filename_component(_gcc_bin_dir "${CMAKE_C_COMPILER}" DIRECTORY)
-  get_filename_component(_gcc_root "${_gcc_bin_dir}" DIRECTORY)
-  if(IS_DIRECTORY "${_gcc_root}/lib64")
-    set(GCC_LIB_DIR "${_gcc_root}/lib64")
-  elseif(IS_DIRECTORY "${_gcc_root}/lib")
-    set(GCC_LIB_DIR "${_gcc_root}/lib")
+  if(CMAKE_CROSSCOMPILING)
+    # Cross compile: ask GCC where libgcc lives, take its dirname.
+    # Avoids guessing host ${prefix}/lib(64), which is wrong for nested
+    # toolchains like Buildroot's host/usr/bin → host/aarch64-...-gnu/lib.
+    execute_process(
+      COMMAND "${CMAKE_C_COMPILER}" -print-libgcc-file-name
+      OUTPUT_VARIABLE _libgcc_path
+      OUTPUT_STRIP_TRAILING_WHITESPACE
+      RESULT_VARIABLE _gcc_query_rv
+    )
+    if(_gcc_query_rv EQUAL 0 AND _libgcc_path)
+      get_filename_component(GCC_LIB_DIR "${_libgcc_path}" DIRECTORY)
+    endif()
+  else()
+    get_filename_component(_gcc_bin_dir "${CMAKE_C_COMPILER}" DIRECTORY)
+    get_filename_component(_gcc_root "${_gcc_bin_dir}" DIRECTORY)
+    if(IS_DIRECTORY "${_gcc_root}/lib64")
+      set(GCC_LIB_DIR "${_gcc_root}/lib64")
+    elseif(IS_DIRECTORY "${_gcc_root}/lib")
+      set(GCC_LIB_DIR "${_gcc_root}/lib")
+    endif()
   endif()
 endif()
 
@@ -216,10 +245,25 @@ if(DEFINED RUST_TARGET AND NOT RUST_TARGET STREQUAL \"\")
 endif()
 
 message(STATUS \"[run_cargo.cmake] CFG=\${CFG}  CARGO=\${CARGO}  PROTOC=\${PROTOC_PATH}\")
-set(ENV{PROTOC} \"\${PROTOC_PATH}\")
+# 交叉编译时 PROTOC_PATH 指向 vendored protobuf 编出来的目标架构 protoc（aarch64），
+# 在 host 跑不起来。让 cargo 用调用方 env 里的 host PROTOC（env-rv1126b.sh 导出了
+# \$(command -v protoc)）。Native 路径继续走 PROTOC_PATH。
+if(DEFINED CROSS_COMPILE AND CROSS_COMPILE)
+  if(NOT DEFINED ENV{PROTOC} OR \"\$ENV{PROTOC}\" STREQUAL \"\")
+    message(FATAL_ERROR \"[run_cargo.cmake] Cross build requires host PROTOC in env; source scripts/env-rv1126b.sh first\")
+  endif()
+  message(STATUS \"[run_cargo.cmake] Cross build — keeping env PROTOC=\$ENV{PROTOC}\")
+else()
+  set(ENV{PROTOC} \"\${PROTOC_PATH}\")
+endif()
 
 if(DEFINED GCC_LIB_DIR AND NOT GCC_LIB_DIR STREQUAL \"\")
-  set(ENV{RUSTFLAGS} \"-L \${GCC_LIB_DIR} \$ENV{RUSTFLAGS}\")
+  # 交叉编译时不要往 RUSTFLAGS 注 -L —— 上游 client-sdk-rust/.cargo/config.toml
+  # 的 rustflags 包含 -fuse-ld=lld（链 libwebrtc.a 必需），cargo 对 RUSTFLAGS env 是
+  # 整体覆盖语义会把那一项冲掉。Native 路径保持原行为（修非系统 libstdc++ 缺符号）。
+  if(NOT DEFINED CROSS_COMPILE OR NOT CROSS_COMPILE)
+    set(ENV{RUSTFLAGS} \"-L \${GCC_LIB_DIR} \$ENV{RUSTFLAGS}\")
+  endif()
   set(ENV{LD_LIBRARY_PATH} \"\${GCC_LIB_DIR}:\$ENV{LD_LIBRARY_PATH}\")
 endif()
 
@@ -306,6 +350,7 @@ add_custom_command(
           -DPROTOC_PATH=${Protobuf_PROTOC_EXECUTABLE}
           -DRUST_TARGET=${RUST_TARGET_TRIPLE}
           -DGCC_LIB_DIR=${GCC_LIB_DIR}
+          -DCROSS_COMPILE=${CMAKE_CROSSCOMPILING}
           -P "${RUN_CARGO_SCRIPT}"
   WORKING_DIRECTORY "${RUST_ROOT}"
   DEPENDS ${RUST_SOURCES}

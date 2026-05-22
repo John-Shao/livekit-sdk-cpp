@@ -142,9 +142,19 @@ amixer -c 0 cset numid=40 9   > /dev/null 2>&1 || true  # ADCR PGA = +27 dB
 amixer -c 0 cset numid=48 "$DAC" > /dev/null 2>&1 || true  # DACL
 amixer -c 0 cset numid=49 "$DAC" > /dev/null 2>&1 || true  # DACR
 
-# ---- 杀残留 ----
-pkill -f BoardLoopback 2>/dev/null || true
-pkill -f weston       2>/dev/null || true
+# ---- 杀残留 + 让出硬件 ----
+# 出厂 IPC 固件的 camera_core_d 占着摄像头 + DRM + 8080 端口，camera_ui_d /
+# weston 占着 DRM。BoardLoopback 跑前必须让出。busybox 没有 pkill，改用
+# init 脚本 stop + pidof + kill（-g4a1fe4ec 之后的板子镜像才有这些服务）。
+[ -x /etc/init.d/S96camera-ui-d ]   && /etc/init.d/S96camera-ui-d stop   >/dev/null 2>&1 || true
+[ -x /etc/init.d/S95camera-core-d ] && /etc/init.d/S95camera-core-d stop >/dev/null 2>&1 || true
+for _p in $(pidof BoardLoopback camera_core_d camera_ui_d weston 2>/dev/null); do
+  kill "$_p" 2>/dev/null || true
+done
+sleep 2
+for _p in $(pidof BoardLoopback camera_core_d camera_ui_d weston 2>/dev/null); do
+  kill -9 "$_p" 2>/dev/null || true
+done
 sleep 1
 
 # ---- env ----
@@ -194,13 +204,21 @@ echo "  bg       = $BG"
 echo "  log      = $LOG (only when --bg)"
 echo "==============="
 
+# stdbuf forces unbuffered stdout/stderr so --tail sees logs live. Some
+# Buildroot board images ship busybox without it — degrade gracefully.
+if command -v stdbuf >/dev/null 2>&1; then
+  STDBUF="stdbuf -o0 -e0"
+else
+  STDBUF=""
+fi
+
 if [ "$BG" = "1" ]; then
   rm -f "$LOG"
-  nohup stdbuf -o0 -e0 ./BoardLoopback > "$LOG" 2>&1 &
+  nohup $STDBUF ./BoardLoopback > "$LOG" 2>&1 &
   PID=$!
   echo "started pid=$PID"
   echo "tail with: $0 --tail"
   echo "stop with: kill $PID"
 else
-  exec stdbuf -o0 -e0 ./BoardLoopback
+  exec $STDBUF ./BoardLoopback
 fi

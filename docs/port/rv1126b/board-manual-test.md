@@ -17,7 +17,7 @@
 | 屏幕 | 720×1280 竖屏 MIPI DSI |
 | 摄像头 | `/dev/video-camera0`（1280×720 横向输出，物理竖装）|
 | 音频 | ES8389 codec，ALSA card 0 |
-| 板子 IP | `192.168.10.235`（固定，已配 SSH 别名 `rv1126b-board`）|
+| 板子 IP | `192.168.2.197`（固定，已配 SSH 别名 `rv1126b-board`）|
 | 构建 VM IP | `192.168.126.129`（固定，SSH 别名 `rv1126b-vm`）|
 | 串口 | USB-TTL 115200 8N1，板子端 `/dev/ttyS2` 或 `/dev/ttyFIQ0` |
 
@@ -50,7 +50,7 @@ Host rv1126b-vm
     StrictHostKeyChecking accept-new
 
 Host rv1126b-board
-    HostName 192.168.10.235
+    HostName 192.168.2.197
     User root
     IdentityFile ~/.ssh/id_rv1126b_board
     IdentitiesOnly yes
@@ -78,10 +78,10 @@ ssh rv1126b-board 'echo board ok'
 
 ```bash
 # 在 WSL 中执行，出现密码提示时输入 rockchip
-ssh-copy-id -i ~/.ssh/id_rv1126b_board.pub root@192.168.10.235
+ssh-copy-id -i ~/.ssh/id_rv1126b_board.pub root@192.168.2.197
 
 # 或手动方式（ssh-copy-id 不可用时）
-ssh root@192.168.10.235 \
+ssh root@192.168.2.197 \
   'mkdir -p /root/.ssh && \
    echo "ssh-ed25519 AAAAC3NzaC1lZDI1NTE5AAAAINHoUYAf/Ws8wWErE03TX+4Ab1KYvQS0BfNKPqyek1IA claude-code@rv1126b-board 20260424" \
    >> /root/.ssh/authorized_keys && \
@@ -129,6 +129,8 @@ ssh rv1126b-board 'ls -la /opt/livekit/'
 
 ## 5. LiveKit Token
 
+手机进入房间：499707
+
 测试房间使用固定 JWT：`f1d641ae-e19d-4461-8a8b-2582d4036798`
 
 写到板子（只需写一次，重启后不会丢失——`/opt/livekit/` 在持久层）：
@@ -143,9 +145,33 @@ smoke.sh 会自动读取 `/opt/livekit/.token`，无需每次传 `--token` 参�
 
 ---
 
-## 6. 启动 BoardLoopback
+## 6. 准备工作：释放摄像头（每次重启后）
 
-### 6.1 串口控制台启动（推荐，WiFi 不稳时）
+板子出厂固件在开机时自动启动 `/userdata/camera_core_d`，该进程持有 `/dev/video-camera0`，导致 BoardLoopback 启动时报 `Device or resource busy`。每次重启后需先杀掉它。
+
+```bash
+# 在 WSL 中执行
+ssh rv1126b-board '
+  _pid=$(ps | grep camera_core_d | grep -v grep | awk "{print \$1}")
+  [ -n "$_pid" ] && kill -9 $_pid && echo "killed camera_core_d pid=$_pid" || echo "camera_core_d not running"
+  fuser /dev/video-camera0 2>/dev/null || echo "camera free"
+'
+```
+
+预期输出：
+```
+killed camera_core_d pid=<N>
+camera free
+```
+
+> smoke.sh 启动清理步骤已内置此逻辑（BusyBox 兼容），正常情况下自动处理。
+> 如果 smoke.sh 启动前摄像头仍被占用，手动执行上面命令。
+
+---
+
+## 7. 启动 BoardLoopback
+
+### 7.1 串口控制台启动（推荐，WiFi 不稳时）
 
 连上串口（115200 8N1）后在板子 shell 里操作：
 
@@ -168,14 +194,14 @@ tail -f /tmp/smoke.log
 [daemon] waiting for HTTP /v1/meeting/join ...
 ```
 
-### 6.2 SSH 启动（WiFi 稳定时，在 WSL 中执行）
+### 7.2 SSH 启动（WiFi 稳定时，在 WSL 中执行）
 
 ```bash
 ssh rv1126b-board 'cd /opt/livekit && BOARD_API_TOKEN=test123 ./smoke.sh --bg'
 ssh rv1126b-board 'tail -f /tmp/smoke.log'
 ```
 
-### 6.3 停止进程
+### 7.3 停止进程
 
 ```sh
 # 板子上（BusyBox 没有 pkill，用 kill + PID）
@@ -191,14 +217,14 @@ BoardLoopback 运行后在 `0.0.0.0:8080` 提供三个端点。以下命令在 *
 ### 7.1 查询状态（无需认证）
 
 ```bash
-curl http://192.168.10.235:8080/v1/meeting/status
+curl http://192.168.2.197:8080/v1/meeting/status
 # 正常返回：{"state":"idle","participant_count":0,"active_speaker":"","room_name":""}
 ```
 
 ### 7.2 入会
 
 ```bash
-curl -X POST http://192.168.10.235:8080/v1/meeting/join \
+curl -X POST http://192.168.2.197:8080/v1/meeting/join \
   -H "Authorization: Bearer test123" \
   -H "Content-Type: application/json" \
   -d '{"url":"wss://live.jusiai.com","token":"f1d641ae-e19d-4461-8a8b-2582d4036798"}'
@@ -208,14 +234,14 @@ curl -X POST http://192.168.10.235:8080/v1/meeting/join \
 入会后查状态：
 
 ```bash
-curl http://192.168.10.235:8080/v1/meeting/status
+curl http://192.168.2.197:8080/v1/meeting/status
 # {"state":"in_meeting","room_name":"<ROOM>","participant_count":1,"active_speaker":""}
 ```
 
 ### 7.3 退会
 
 ```bash
-curl -X POST http://192.168.10.235:8080/v1/meeting/leave \
+curl -X POST http://192.168.2.197:8080/v1/meeting/leave \
   -H "Authorization: Bearer test123"
 # 返回 200
 ```
@@ -223,7 +249,7 @@ curl -X POST http://192.168.10.235:8080/v1/meeting/leave \
 ### 7.4 认证失败验证
 
 ```bash
-curl -X POST http://192.168.10.235:8080/v1/meeting/join \
+curl -X POST http://192.168.2.197:8080/v1/meeting/join \
   -H "Content-Type: application/json" \
   -d '{"url":"wss://live.jusiai.com","token":"f1d641ae-e19d-4461-8a8b-2582d4036798"}'
 # 应返回 401 Unauthorized（无 Bearer 头）
@@ -279,7 +305,9 @@ kill -9 <PID>
 [loopback] v4l2 S_FMT failed: Device or resource busy
 ```
 
-同上，有残留 BoardLoopback 进程，kill 后重启。
+两种情况：
+1. **工厂 camera daemon**（最常见，每次重启后）：执行第 6 节命令杀掉 `camera_core_d`。
+2. **残留 BoardLoopback 进程**：`ps | grep Board` 查 PID，`kill -9 <PID>` 后重启。
 
 ### 公钥每次重启后失效
 
@@ -289,7 +317,7 @@ overlay rootfs 设计如此。每次重启执行第 3 节命令重装。如需�
 
 ```bash
 # 在 WSL 中检查连通性
-ping 192.168.10.235
+ping 192.168.2.197
 # 如果超时，IP 可能变了，从路由器 DHCP 表或串口 `ip addr` 查新 IP
 # 然后更新 WSL 的 ~/.ssh/config 里的 HostName
 ```

@@ -143,8 +143,12 @@ amixer -c 0 cset numid=48 "$DAC" > /dev/null 2>&1 || true  # DACL
 amixer -c 0 cset numid=49 "$DAC" > /dev/null 2>&1 || true  # DACR
 
 # ---- 杀残留 ----
-pkill -f BoardLoopback 2>/dev/null || true
-pkill -f weston       2>/dev/null || true
+# BusyBox 没有 pkill；用 kill + ps grep 替代。
+# 同时清掉工厂 camera daemon（开机时持有 /dev/video-camera0）。
+for _pat in BoardLoopback weston camera_core_d; do
+  _pid=$(ps | grep "$_pat" | grep -v grep | awk '{print $1}')
+  [ -n "$_pid" ] && kill -9 $_pid 2>/dev/null || true
+done
 sleep 1
 
 # ---- env ----
@@ -177,6 +181,12 @@ else
 fi
 export BOARD_API_TOKEN="$BOARD_API_TOKEN"
 export BOARD_API_PORT="$BOARD_API_PORT"
+# TLS CA bundle（Buildroot rootfs 无系统 CA 目录，需显式指定）。
+# /opt/livekit/ca-certificates.crt 从构建 VM /etc/ssl/certs/ 拷贝，
+# 首次部署时执行：scp rv1126b-vm:/etc/ssl/certs/ca-certificates.crt rv1126b-board:/opt/livekit/
+if [ -f /opt/livekit/ca-certificates.crt ]; then
+  export SSL_CERT_FILE=/opt/livekit/ca-certificates.crt
+fi
 
 # ---- run ----
 echo "==== smoke ===="
